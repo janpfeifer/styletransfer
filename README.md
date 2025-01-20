@@ -20,7 +20,7 @@ There are still tons that can be improved:
 
 ## Samples from [Notebook](https://github.com/janpfeifer/styletransfer/blob/main/demo.ipynb)
 
-Stylized GoMLX logo:
+GoMLX logo in style:
 
 ![image](https://github.com/user-attachments/assets/5d6ed0b0-7226-459d-af4a-7486482c6d7b)
 
