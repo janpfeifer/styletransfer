@@ -1,6 +1,6 @@
 # Style Transfer using [GoMLX](github.com/gomlx/gomlx), a machine learning framework for Go
 
-> Note: see demo in the [notebook](https://github.com/janpfeifer/styletransfer/blob/main/demo.ipynb)
+> Note: see [demo notebook](https://github.com/janpfeifer/styletransfer/blob/main/demo.ipynb)
 
 Based on [1], the seminal paper on the topic. With some help of the blog post [2]. But it uses the InceptionV3 image model instead of the VGG-19 for style transfer.
 
