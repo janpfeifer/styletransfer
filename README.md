@@ -24,6 +24,6 @@ Stylized GoMLX logo:
 
 ![image](https://github.com/user-attachments/assets/5d6ed0b0-7226-459d-af4a-7486482c6d7b)
 
-Image from country side of France, while hiking the [Via Podiensis](https://en.wikipedia.org/wiki/Via_Podiensis):
+Image from the country side of France, while hiking the [Via Podiensis](https://en.wikipedia.org/wiki/Via_Podiensis):
 
 ![image](https://github.com/user-attachments/assets/4800fd8b-e297-4dbd-bec9-13291d758225)
