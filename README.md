@@ -4,7 +4,7 @@
 
 Based on [1], the seminal paper on the topic. With some help of the blog post [2]. But it uses the InceptionV3 image model instead of the VGG-19 for style transfer.
 
-All the code is in the repository [github.com/janpfeifer/styletransfer/styletransfer](https://github.com/janpfeifer/styletransfer/styletransfer),
+All the code is in the repository [github.com/janpfeifer/styletransfer/styletransfer](https://github.com/janpfeifer/styletransfer/blob/main/styletransfer/styletransfer.go),
 it's only about 400 lines of code, including I/O code (loading and displaying the images).
 
 * [1] "A Neural Algorithm of Artistic Style", 2015, Gatys, Ecker & Bethge -- https://arxiv.org/abs/1508.06576
