@@ -18,6 +18,7 @@ import (
 	"github.com/gomlx/gomlx/ml/context"
 	"github.com/gomlx/gomlx/ml/train/optimizers"
 	"github.com/gomlx/gomlx/types/tensors"
+	"math"
 	"time"
 )
 
@@ -42,6 +43,7 @@ type Config struct {
 	originalLossWeight, styleLossWeight float64
 	numSteps                            int
 	numMomentsForStyle                  int
+	momentsWeightsRation                float64
 }
 
 // New creates a style transfer configuration object: it takes as input the original image,
@@ -96,23 +98,61 @@ func (cfg *Config) NumSteps(numSteps int) *Config {
 	return cfg
 }
 
-// MomentsForStyle sets the number of moments to use from the style: if numMoments is > 0,
-// it will use the referred moments of the distribution (1=mean, 2=mean+variance, 3=mean+variance+skew, etc.)
-// for the style loss for transfer.
+// MomentsForStyle sets the number of the distribution non-standardized moments to use from the style:
+// if numMoments is > 0, it will use the referred moments of the distribution (1=mean, 2=mean+variance,
+// 3=mean+variance+non-standardized skewness, etc.) for the style loss for transfer.
+//
+// weightsRatio define the ration among the weights for each consecutive moment. So the mean (1st moment)
+// has weigh 1.0, the variance (2nd moment) has weight weightsRatio, the 3rd moment has weight weightsRation^2,
+// and so on. Typical value: 0.25.
 //
 // The default is numMoments is 0, in which case it uses the GramMatrix for loss.
-func (cfg *Config) MomentsForStyle(numMoments int) *Config {
+func (cfg *Config) MomentsForStyle(numMoments int, weightsRatio float64) *Config {
 	cfg.numMomentsForStyle = numMoments
+	cfg.momentsWeightsRation = weightsRatio
 	return cfg
 }
 
 // gramMatrix returns a [numChannels, numChannels] matrix with the correlation of channels across the image.
-func gramMatrix(img *Node) *Node {
-	numChannels := img.Shape().Dim(-1)
-	flat := Reshape(img, -1, numChannels)
+func gramMatrix(embeddings *Node) *Node {
+	numChannels := embeddings.Shape().Dim(-1)
+	flat := Reshape(embeddings, -1, numChannels)
 	gram := MatMul(Transpose(flat, 0, 1), flat)
 	gram.AssertDims(numChannels, numChannels)
 	return gram
+}
+
+// moments calculates the various moments of the distribution across the spatial dimensions (width and height).
+func (cfg *Config) moments(embeddings *Node) *Node {
+	// Flatten image.
+	batchSize := embeddings.Shape().Dim(0)
+	numChannels := embeddings.Shape().Dim(-1)
+	flat := Reshape(embeddings, batchSize, -1, numChannels)
+
+	mean := ReduceAndKeep(flat, ReduceMean, 1)
+	if cfg.numMomentsForStyle <= 1 {
+		return mean
+	}
+	moments := []*Node{mean}
+	weight := 1.0
+	normalized := Sub(flat, mean)
+	power := normalized
+	for _ = range cfg.numMomentsForStyle - 1 {
+		power = Mul(power, normalized)
+		moments = append(moments,
+			MulScalar(ReduceAndKeep(power, ReduceMean, 1), weight))
+		weight *= cfg.momentsWeightsRation
+	}
+	return Concatenate(moments, -1)
+}
+
+// styleEmbeddings returns whatever is the signal used for the style transfer: for now
+// only gramMatrix (original paper) or moments are defined.
+func (cfg *Config) styleEmbeddings(embeddings *Node) *Node {
+	if cfg.numMomentsForStyle > 0 {
+		return cfg.moments(embeddings)
+	}
+	return gramMatrix(embeddings)
 }
 
 // precalculateEmbeddings for the original image and store them as variables in the context.
@@ -128,6 +168,11 @@ func (cfg *Config) precalculateEmbeddings() {
 			scopedCtx := ctx.In(layersNames[imageIdx])
 			for layerIdx, layer := range layers {
 				varName := fmt.Sprintf("layer_%d", layerIdx)
+				// For style we take the transformed embeddings that we are going to use.
+				if imageIdx == 1 {
+					layer = cfg.styleEmbeddings(layer)
+				}
+
 				// Create variable, or set it, if it doesn't yet exist.
 				v := scopedCtx.GetVariable(varName)
 				if v == nil {
@@ -186,15 +231,18 @@ func (cfg *Config) loss(ctx *context.Context, x *Node) (loss *Node) {
 		numChannels := xLayer.Shape().Dim(-1)
 		imageSize := xLayer.Shape().Dim(1) * xLayer.Shape().Dim(2)
 
-		// Style loss: Gram Matrix loss
-		gramX := gramMatrix(xLayer)
-		gramStyle := gramMatrix(styleLayer)
-		gramLoss := ReduceAllMean(Square(Sub(gramX, gramStyle)))
-		gramLoss = DivScalar(gramLoss, 4*imageSize*numChannels)
+		// Style loss: notice that the cached styleLayer already went through the `cfg.styleEmbeddings()`
+		// transformation.
+		xStyle := cfg.styleEmbeddings(xLayer)
+		layerStyleLoss := ReduceAllMean(Square(Sub(xStyle, styleLayer)))
+		if cfg.numMomentsForStyle == 0 {
+			// GramMatrix loss
+			layerStyleLoss = DivScalar(layerStyleLoss, 4*imageSize*numChannels)
+		}
 		if styleLoss == nil {
-			styleLoss = gramLoss
+			styleLoss = layerStyleLoss
 		} else {
-			styleLoss = Add(styleLoss, gramLoss)
+			styleLoss = Add(styleLoss, layerStyleLoss)
 		}
 
 		// Original image loss: mean of the square of the difference of the features between generated and new image.
@@ -270,6 +318,12 @@ func (cfg *Config) Transfer() *tensors.Tensor {
 			loss.FinalizeAll()
 		}
 		loss = stepExec.Call()[0]
+		if math.IsNaN(float64(tensors.ToScalar[float32](loss))) {
+			fmt.Println()
+			fmt.Println("*** Loss became NaN, stopping. Try different hyperparameters.")
+			break
+		}
+
 		duration := time.Since(start).Seconds()
 		if step < 10 {
 			avgDuration = duration
