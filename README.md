@@ -1,4 +1,4 @@
-# Style Transfer using [GoMLX](github.com/gomlx/gomlx), a machine learning framework for Go
+# Style Transfer using [GoMLX](https://github.com/gomlx/gomlx), a machine learning framework for Go
 
 > Note: see [demo notebook](https://github.com/janpfeifer/styletransfer/blob/main/demo.ipynb)
 
