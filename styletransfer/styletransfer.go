@@ -303,22 +303,26 @@ func (cfg *Config) Transfer() *tensors.Tensor {
 	xVar.SetTrainable(true)
 
 	// Create computation graph for one training step.
-	// It updates x and returns the loss -- only for displaying.
+	// It updates x and returns the lossT -- only for displaying.
 	stepExec := context.NewExec(cfg.backend, ctx, func(ctx *context.Context, g *Graph) *Node {
 		return cfg.transferStepGraph(ctx, g, xVar)
 	})
 
-	// Iterate training step, minimizing the loss and generating the image with the style transferred.
-	var avgDuration float64
-	var lastPrint time.Time
-	var loss *tensors.Tensor
+	// Iterate training step, minimizing the lossT and generating the image with the style transferred.
+	var (
+		avgDuration float64
+		lastPrint   time.Time
+		lossT       *tensors.Tensor
+		loss        float32
+	)
 	for step := 0; step < cfg.numSteps; step++ {
 		start := time.Now()
-		if loss != nil {
-			loss.FinalizeAll()
+		if lossT != nil {
+			lossT.FinalizeAll()
 		}
-		loss = stepExec.Call()[0]
-		if math.IsNaN(float64(tensors.ToScalar[float32](loss))) {
+		lossT = stepExec.Call()[0]
+		loss = tensors.ToScalar[float32](lossT)
+		if math.IsNaN(float64(loss)) {
 			fmt.Println()
 			fmt.Println("*** Loss became NaN, stopping. Try different hyperparameters.")
 			break
@@ -331,12 +335,14 @@ func (cfg *Config) Transfer() *tensors.Tensor {
 			avgDuration = 0.9*avgDuration + 0.1*duration
 		}
 		if time.Since(lastPrint) > time.Second {
-			fmt.Printf("\rStyle transferring: step=%05d of %05d (%8.1f ms/step) -- loss=%s			       ",
-				step+1, cfg.numSteps, avgDuration*1000.0, loss)
+			eta := time.Duration(1000.0 * float64(cfg.numSteps-step) * avgDuration)
+			eta = eta * time.Millisecond
+			fmt.Printf("\rStyle transferring: step=%05d of %05d (%.1f ms/step, ETA %s) -- loss=%.3g			       ",
+				step+1, cfg.numSteps, avgDuration*1000.0, eta, loss)
 			lastPrint = time.Now()
 		}
 	}
-	fmt.Printf("\rStyle transferring: step=%05d of %05d (%5.1fms/step) -- loss=%s			  \n",
+	fmt.Printf("\rStyle transferring: step=%05d of %05d (%.1f ms/step) -- loss=%.3g			                  \n",
 		cfg.numSteps, cfg.numSteps, avgDuration*1000.0, loss)
 
 	// Take generated image variable and de-normalize it back to a normal image.
