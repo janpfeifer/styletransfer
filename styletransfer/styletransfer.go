@@ -12,6 +12,7 @@ package styletransfer
 
 import (
 	"fmt"
+	"github.com/gomlx/exceptions"
 	"github.com/gomlx/gomlx/backends"
 	. "github.com/gomlx/gomlx/graph"
 	"github.com/gomlx/gomlx/ml/context"
@@ -40,6 +41,7 @@ type Config struct {
 	original, style                     *tensors.Tensor
 	originalLossWeight, styleLossWeight float64
 	numSteps                            int
+	numMomentsForStyle                  int
 }
 
 // New creates a style transfer configuration object: it takes as input the original image,
@@ -94,6 +96,16 @@ func (cfg *Config) NumSteps(numSteps int) *Config {
 	return cfg
 }
 
+// MomentsForStyle sets the number of moments to use from the style: if numMoments is > 0,
+// it will use the referred moments of the distribution (1=mean, 2=mean+variance, 3=mean+variance+skew, etc.)
+// for the style loss for transfer.
+//
+// The default is numMoments is 0, in which case it uses the GramMatrix for loss.
+func (cfg *Config) MomentsForStyle(numMoments int) *Config {
+	cfg.numMomentsForStyle = numMoments
+	return cfg
+}
+
 // gramMatrix returns a [numChannels, numChannels] matrix with the correlation of channels across the image.
 func gramMatrix(img *Node) *Node {
 	numChannels := img.Shape().Dim(-1)
@@ -103,11 +115,66 @@ func gramMatrix(img *Node) *Node {
 	return gram
 }
 
+// precalculateEmbeddings for the original image and store them as variables in the context.
+func (cfg *Config) precalculateEmbeddings() {
+	// Executes the GoMLX code to update the variables. It doesnt' return anything directly (only through
+	// the updated variables.
+	_ = context.ExecOnceN(cfg.backend, cfg.ctx, func(ctx *context.Context, original, style *Node) []*Node {
+		g := original.Graph()
+		ctx.SetTraining(g, false)
+		allLayers := InceptionV3PerLayerEmbeddings(ctx, []*Node{original, style})
+		layersNames := []string{"original_embeddings", "style_embeddings"}
+		for imageIdx, layers := range allLayers {
+			scopedCtx := ctx.In(layersNames[imageIdx])
+			for layerIdx, layer := range layers {
+				varName := fmt.Sprintf("layer_%d", layerIdx)
+				// Create variable, or set it, if it doesn't yet exist.
+				v := scopedCtx.GetVariable(varName)
+				if v == nil {
+					v = scopedCtx.VariableWithValueGraph(varName, layer)
+				} else {
+					v.SetValueGraph(layer)
+				}
+				v.SetTrainable(false)
+			}
+		}
+		return nil
+	}, cfg.original, cfg.style)
+}
+
+// loadEmbeddings load the values created by precalculatedEmbeddings in the scopedCtx --
+// scopedCtx must be in scope "original_embeddings" or "style_embeddings".
+func (cfg *Config) loadEmbeddings(scopedCtx *context.Context, g *Graph) []*Node {
+	var e []*Node
+	layerIdx := 0
+	for {
+		varName := fmt.Sprintf("layer_%d", layerIdx)
+		v := scopedCtx.GetVariable(varName)
+		if v == nil {
+			// No more layers
+			break
+		}
+		e = append(e, v.ValueGraph(g))
+		layerIdx++
+	}
+	return e
+}
+
 // loss calculates the loss of x with respect to the upper layers original image and lower layers of the style image.
-func (cfg *Config) loss(ctx *context.Context, x, original, style *Node) (loss *Node) {
+func (cfg *Config) loss(ctx *context.Context, x *Node) (loss *Node) {
 	// Calculate the embeddings for all layers.
-	allLayers := InceptionV3PerLayerEmbeddings(ctx, []*Node{x, original, style})
-	xLayers, originalLayers, styleLayers := allLayers[0], allLayers[1], allLayers[2]
+	g := x.Graph()
+	xLayers := InceptionV3PerLayerEmbeddings(ctx, []*Node{x})[0]
+	originalLayers := cfg.loadEmbeddings(ctx.In("original_embeddings"), g)
+	styleLayers := cfg.loadEmbeddings(ctx.In("style_embeddings"), g)
+	if len(xLayers) != len(originalLayers) {
+		exceptions.Panicf("expected same number of layers for x (%d) and original (%d) layers",
+			len(xLayers), len(originalLayers))
+	}
+	if len(xLayers) != len(styleLayers) {
+		exceptions.Panicf("expected same number of layers for x (%d) and style (%d) layers",
+			len(xLayers), len(styleLayers))
+	}
 
 	// Calculate mean loss on the style image.
 	var styleLoss, originalLoss *Node
@@ -151,11 +218,10 @@ func (cfg *Config) loss(ctx *context.Context, x, original, style *Node) (loss *N
 }
 
 // transferStepGraph builds the computation graph that executes one step of style transfer.
-func (cfg *Config) transferStepGraph(ctx *context.Context, xVar *context.Variable, original, style *Node) *Node {
-	g := original.Graph()
+func (cfg *Config) transferStepGraph(ctx *context.Context, g *Graph, xVar *context.Variable) *Node {
 	ctx.SetTraining(g, true)
 	x := xVar.ValueGraph(g)
-	loss := cfg.loss(ctx, x, original, style)
+	loss := cfg.loss(ctx, x)
 
 	// Optimize loss on xVar
 	opt := optimizers.FromContext(ctx)
@@ -175,6 +241,9 @@ func (cfg *Config) transferStepGraph(ctx *context.Context, xVar *context.Variabl
 func (cfg *Config) Transfer() *tensors.Tensor {
 	ctx := cfg.ctx
 
+	// Pre-generate embeddings for original and style images.
+	cfg.precalculateEmbeddings()
+
 	// Target image x that we want to generate: make it a trainable variable, initialized with the original image.
 	xVar := ctx.GetVariable("x")
 	if xVar == nil {
@@ -187,8 +256,8 @@ func (cfg *Config) Transfer() *tensors.Tensor {
 
 	// Create computation graph for one training step.
 	// It updates x and returns the loss -- only for displaying.
-	stepExec := context.NewExec(cfg.backend, ctx, func(ctx *context.Context, original, style *Node) *Node {
-		return cfg.transferStepGraph(ctx, xVar, original, style)
+	stepExec := context.NewExec(cfg.backend, ctx, func(ctx *context.Context, g *Graph) *Node {
+		return cfg.transferStepGraph(ctx, g, xVar)
 	})
 
 	// Iterate training step, minimizing the loss and generating the image with the style transferred.
@@ -200,7 +269,7 @@ func (cfg *Config) Transfer() *tensors.Tensor {
 		if loss != nil {
 			loss.FinalizeAll()
 		}
-		loss = stepExec.Call(cfg.original, cfg.style)[0]
+		loss = stepExec.Call()[0]
 		duration := time.Since(start).Seconds()
 		if step < 10 {
 			avgDuration = duration
